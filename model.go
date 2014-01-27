@@ -584,6 +584,11 @@ func (m *Model) Vclock() (vclock []byte) {
 	return m.robject.Vclock
 }
 
+// Return the object siblings meta-informations
+func (m *Model) SiblingsMetaInfo() []Sibling {
+	return m.robject.Siblings
+}
+
 // Return the object's indexes.  This allows an application to set custom secondary
 // indexes on the object for later querying.
 func (m *Model) Indexes() map[string]string {
