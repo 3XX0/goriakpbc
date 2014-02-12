@@ -33,7 +33,6 @@ func main() {
 }
 ```
 
-Parts of the library are specifically designed to facilitate projects that use both Ruby and Go. See the "Document Models" below.
 To install run `go get github.com/tpjg/goriakpbc` and use import as in the example above. If the Document Models (ORM) features are not needed simply run `rm $GOPATH/src/github.com/tpjg/goriakpbc/model*.go` after `go get`.
 
 ### Documentation
@@ -145,24 +144,12 @@ http://godoc.org/github.com/tpjg/goriakpbc#Search for all of them.
 
 Document Models, commonly referred to as ORM (Object-Relational Mapping) in other database drivers, maps Go structs to an object in Riak and supports links between objects. This is done by parsing the JSON data from an object in Riak and mapping it to a struct's fields.
 
-The library allows for easy integration of a Go application into a project that also uses Ruby (on Rails) with the "ripple" gem (https://github.com/basho/ripple). To enable easy integration with Ruby/ripple projects the struct "tag" feature of Go is used to get around the naming convention differences between Go and Ruby (Uppercase starting letter required for export versus Uppercase being constants and typically CamelCase versus snake_case). Also it stores the model/struct name as _type in Riak just like ripple does.
-
-For example the following Ruby/Ripple class:
-```ruby
-    class Device
-      include Ripple::Document
-      property :ip, String
-      property :description, String
-      property :download_enabled, Boolean
-    end
-```
-can be mapped to the following Go struct:
 ```go
     type Device struct {
-        DownloadEnabled  bool    `riak:"download_enabled"`
-        Ip               string  `riak:"ip"`
-        Description      string  `riak:"description"`
-        riak.Model       `riak:"devices"`
+        riak.Model       		 `bucket:"devices"`
+        DownloadEnabled  bool    `json:"download_enabled"`
+        Ip               string  `json:"ip"`
+        Description      string  `json:"description"`
     }
 ```
 Note that it is required to have an (anonymous) riak.Model field. If the riak.Model field is an anonymous field this has the benefit that the functions like "Save" or "SaveAs" can be called directly as in the example below.

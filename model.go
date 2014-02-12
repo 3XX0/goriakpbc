@@ -1,48 +1,28 @@
 package riak
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
-
-	"github.com/tpjg/goriakpbc/json"
 )
 
 /*
-Make structs work like a Document Model, similar to how the Ruby based "ripple"
-gem works. This is done by parsing the JSON data and mapping it to the struct's
-fields. To enable easy integration with Ruby/ripple projects the struct "tag"
-feature of Go is used to possibly get around the naming convention differences
-between Go and Ruby (Uppercase starting letter required for export and
-typically CamelCase versus underscores). Also it stores the model/struct name
-as _type in Riak.
-
-For example the following Ruby/Ripple class:
-
-	class Device
-	  include Ripple::Document
-	  property :ip, String
-	  property :description, String
-	  property :download_enabled, Boolean
-	end
-
-can be mapped to the following Go class:
+Make structs work like a Document Model
+This is done by parsing the JSON data and mapping it to the struct's
+fields.
 
 	type Device struct {
-		riak.Model       `riak:devices`
-		Download_enabled bool    `riak:"download_enabled"`
-		Ip               string  `riak:"ip"`
-		Description      string  `riak:"description"`
+		riak.Model               `bucket:"devices"`
+		Download_enabled bool    `json:"download_enabled"`
+		Ip               string  `json:"ip"`
+		Description      string  `json:"description"`
 	}
-
-Note that it is required to have a riak.Model field.
-Also if the field name in Ripple is equal the extra tag is not needed, (e.g.
-if the Ripple class above would have a "property :Ip, String").
 */
 type Model struct {
-	robject *RObject
-	parent  Resolver // Pointer to the parent struct (Device in example above)
+	robject *RObject `json:"-"`
+	parent  Resolver `json:"-"` // Pointer to the parent struct (Device in example above)
 }
 
 type Resolver interface {
@@ -89,9 +69,9 @@ func (*Model) Resolve(count int) (err error) {
 
 // Link to one other model
 type One struct {
-	model  interface{}
-	link   Link
-	client *Client
+	model  interface{} `json:"-"`
+	link   Link        `json:"-"`
+	client *Client     `json:"-"`
 }
 
 // Link to many other models
@@ -124,7 +104,7 @@ func setup_model(obj *RObject, dest Resolver, rm reflect.Value) {
 
 // Check if the passed destination is a pointer to a struct with riak.Model field
 // Returns the destination Value and Type (dv, dt) as well as the riak.Model field (rm)
-// and the bucketname (bn), which is derived from the tag of the riak.Model field.
+// and the bucketname (bn), which is derived from the tag "bucket" of the riak.Model field.
 func check_dest(dest interface{}) (dv reflect.Value, dt reflect.Type, rm reflect.Value, bn string, err error) {
 	dv = reflect.ValueOf(dest)
 	if dv.Kind() != reflect.Ptr || dv.IsNil() {
@@ -141,7 +121,7 @@ func check_dest(dest interface{}) (dv reflect.Value, dt reflect.Type, rm reflect
 	for i := 0; i < dt.NumField(); i++ {
 		dobj := dt.Field(i)
 		if dobj.Type.Kind() == reflect.Struct && dobj.Type == reflect.TypeOf(Model{}) {
-			bn = dt.Field(i).Tag.Get("riak")
+			bn = dt.Field(i).Tag.Get("bucket")
 			rm = dv.Field(i) // Return the Model field value
 			return
 		}
@@ -150,22 +130,11 @@ func check_dest(dest interface{}) (dv reflect.Value, dt reflect.Type, rm reflect
 	return
 }
 
-type modelName struct {
-	Type string `_type`
-}
-
 /*
 	mapData, maps the decoded JSON data onto the right struct fields, including
 	decoding of links.
 */
 func (c *Client) mapData(dv reflect.Value, dt reflect.Type, data []byte, links []Link, dest interface{}) (err error) {
-	// Double check there is a "_type" field that is the same as the struct
-	// name, this is only a warning though.
-	var mn modelName
-	err = json.Unmarshal(data, &mn)
-	if err != nil || dt.Name() != mn.Type {
-		err = fmt.Errorf("Warning: struct name does not match _type in Riak (%v)", err)
-	}
 	// Unmarshal the destination model
 	jserr := json.Unmarshal(data, dest)
 	if jserr != nil {
@@ -177,11 +146,8 @@ func (c *Client) mapData(dv reflect.Value, dt reflect.Type, data []byte, links [
 		fv := dv.Field(i)
 		if ft.Type == reflect.TypeOf(One{}) {
 			var name string
-			if ft.Tag.Get("riak") != "" {
-				name = ft.Tag.Get("riak")
-			} else if string(ft.Tag) != "" && !strings.Contains(string(ft.Tag), `:"`) {
-				//DEPRECATED: use tag directly if it appears not to have key/values.
-				name = string(ft.Tag)
+			if ft.Tag.Get("json") != "" {
+				name = ft.Tag.Get("json")
 			} else {
 				name = ft.Name
 			}
@@ -193,11 +159,8 @@ func (c *Client) mapData(dv reflect.Value, dt reflect.Type, data []byte, links [
 			}
 		} else if ft.Type == reflect.TypeOf(Many{}) {
 			var name string
-			if ft.Tag.Get("riak") != "" {
-				name = ft.Tag.Get("riak")
-			} else if string(ft.Tag) != "" && !strings.Contains(string(ft.Tag), `:"`) {
-				//DEPRECATED: use tag directly if it appears not to have key/values.
-				name = string(ft.Tag)
+			if ft.Tag.Get("json") != "" {
+				name = ft.Tag.Get("json")
 			} else {
 				name = ft.Name
 			}
@@ -262,36 +225,14 @@ func (m *Model) GetSiblings(dest interface{}) (err error) {
 	return
 }
 
-/*
-The LoadModelFrom function retrieves the data from Riak and stores it in the struct
-that is passed as destination. It stores some necessary information in the
-riak.Model field so it can be used later in other (Save) operations.
-
-If the bucketname is empty ("") it'll be the default bucket, based on the
-riak.Model tag.
-
-Using the "Device" struct as an example:
-
-dev := &Device{}
-err := client.Load("devices", "12345", dev)
-*/
-func (c *Client) LoadModelFrom(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
+// Load data into the model
+func (b *Bucket) LoadModel(key string, dest Resolver, options ...map[string]uint32) (err error) {
 	// Check destination
-	dv, dt, rm, bn, err := check_dest(dest)
+	dv, dt, rm, _, err := check_dest(dest)
 	if err != nil {
 		return err
 	}
-	// Use default bucket name if empty
-	if bucketname == "" {
-		bucketname = bn
-	}
-	// Fetch the object from Riak.
-	bucket, err := c.Bucket(bucketname)
-	if bucket == nil || err != nil {
-		err = fmt.Errorf("Can't get bucket for %v - %v", dt.Name(), err)
-		return
-	}
-	obj, err := bucket.Get(key, options...)
+	obj, err := b.Get(key, options...)
 	if err != nil {
 		if obj != nil {
 			// Set the values in the riak.Model field
@@ -316,7 +257,7 @@ func (c *Client) LoadModelFrom(bucketname string, key string, dest Resolver, opt
 		return dest.Resolve(count)
 	}
 	// Map the data onto the struct.
-	err = c.mapData(dv, dt, obj.Data, obj.Links, dest)
+	err = b.client.mapData(dv, dt, obj.Data, obj.Links, dest)
 
 	// Set the values in the riak.Model field
 	setup_model(obj, dest, rm)
@@ -324,26 +265,21 @@ func (c *Client) LoadModelFrom(bucketname string, key string, dest Resolver, opt
 	return
 }
 
-// Load data into model. DEPRECATED, use LoadModelFrom instead.
-func (c *Client) Load(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
-	return c.LoadModelFrom(bucketname, key, dest, options...)
-}
-
-// Load data into the model using the default bucket (from the Model's struct definition)
-func (c *Client) LoadModel(key string, dest Resolver, options ...map[string]uint32) (err error) {
-	return c.LoadModelFrom("", key, dest, options...)
-}
-
 /*
-Create a new Document Model, passing in the bucketname and key. The key can be
-empty in which case Riak will pick a key. The destination must be a pointer to
-a struct that has the riak.Model field.
-If the bucketname is empty the default bucketname, based on the riak.Model tag
-will be used.
+The LoadModelFrom function retrieves the data from Riak and stores it in the struct
+that is passed as destination. It stores some necessary information in the
+riak.Model field so it can be used later in other (Save) operations.
+
+If the bucketname is empty ("") it'll be the default bucket, based on the
+riak.Model "bucket" tag.
+
+Using the "Device" struct as an example:
+
+dev := &Device{}
+err := client.LoadModelFrom("", "12345", dev)
 */
-func (c *Client) NewModelIn(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
-	// Check destination
-	_, dt, rm, bn, err := check_dest(dest)
+func (c *Client) LoadModelFrom(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
+	_, dt, _, bn, err := check_dest(dest)
 	if err != nil {
 		return err
 	}
@@ -357,6 +293,27 @@ func (c *Client) NewModelIn(bucketname string, key string, dest Resolver, option
 		err = fmt.Errorf("Can't get bucket for %v - %v", dt.Name(), err)
 		return
 	}
+	return bucket.LoadModel(key, dest, options...)
+}
+
+// Load data into model. DEPRECATED, use LoadModelFrom instead.
+func (c *Client) Load(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
+	return c.LoadModelFrom(bucketname, key, dest, options...)
+}
+
+// Load data into the model using the default bucket (from the Model's struct definition)
+func (c *Client) LoadModel(key string, dest Resolver, options ...map[string]uint32) (err error) {
+	return c.LoadModelFrom("", key, dest, options...)
+}
+
+// Instantiate a new model, setting the necessary fields, like the client.
+// If key is not empty that key will be used, otherwise Riak will choose a key.
+func (b *Bucket) NewModel(key string, dest Resolver, options ...map[string]uint32) (err error) {
+	// Check destination
+	_, _, rm, _, err := check_dest(dest)
+	if err != nil {
+		return err
+	}
 	// Check if the RObject field within riak.Model is still nill, otherwise
 	// this destination (dest) is probably an already fully instantiated
 	// struct.
@@ -369,11 +326,36 @@ func (c *Client) NewModelIn(bucketname string, key string, dest Resolver, option
 	}
 	// For the riak.Model field within the struct, set the Client and Bucket
 	// and fields and set the RObject field to nil.
-	model.robject = &RObject{Bucket: bucket, Key: key, ContentType: "application/json", Options: options}
+	model.robject = &RObject{Bucket: b, Key: key, ContentType: "application/json", Options: options}
 	model.parent = dest
 	rm.Set(mv)
 
 	return
+}
+
+/*
+Create a new Document Model, passing in the bucketname and key. The key can be
+empty in which case Riak will pick a key. The destination must be a pointer to
+a struct that has the riak.Model field.
+If the bucketname is empty the default bucketname, based on the riak.Model "bucket" tag
+will be used.
+*/
+func (c *Client) NewModelIn(bucketname string, key string, dest Resolver, options ...map[string]uint32) (err error) {
+	_, dt, _, bn, err := check_dest(dest)
+	if err != nil {
+		return err
+	}
+	// Use default bucket name if empty
+	if bucketname == "" {
+		bucketname = bn
+	}
+	// Fetch the object from Riak.
+	bucket, err := c.Bucket(bucketname)
+	if bucket == nil || err != nil {
+		err = fmt.Errorf("Can't get bucket for %v - %v", dt.Name(), err)
+		return
+	}
+	return bucket.NewModel(key, dest, options...)
 }
 
 // Instantiate a new model, setting the necessary fields, like the client.
@@ -436,11 +418,8 @@ func (c *Client) SaveAs(newKey string, dest Resolver) (err error) {
 		ft := dt.Field(i)
 		fv := dv.Field(i)
 		var fieldname string
-		if ft.Tag.Get("riak") != "" {
-			fieldname = ft.Tag.Get("riak")
-		} else if string(ft.Tag) != "" && !strings.Contains(string(ft.Tag), `:"`) {
-			//DEPRECATED: use tag directly if it appears not to have key/values.
-			fieldname = string(ft.Tag)
+		if ft.Tag.Get("json") != "" {
+			fieldname = ft.Tag.Get("json")
 		} else {
 			fieldname = ft.Name
 		}
@@ -563,6 +542,11 @@ func (m *Model) Reload() (err error) {
 // loaded a newer version of the object
 func (m *Model) Vclock() (vclock []byte) {
 	return m.robject.Vclock
+}
+
+// Return the object siblings meta-informations
+func (m *Model) SiblingsMetaInfo() []Sibling {
+	return m.robject.Siblings
 }
 
 // Return the object's indexes.  This allows an application to set custom secondary
@@ -761,7 +745,7 @@ func LoadModel(key string, dest Resolver, options ...map[string]uint32) (err err
 	if defaultClient == nil {
 		return NoDefaultClientConnection
 	}
-	return defaultClient.LoadModel(key, dest, options...)
+	return defaultClient.LoadModelFrom("", key, dest, options...)
 }
 
 // The LoadModelFrom function retrieves the data from Riak using the default client and stores it in the struct
@@ -771,10 +755,4 @@ func LoadModelFrom(bucketname string, key string, dest Resolver, options ...map[
 		return NoDefaultClientConnection
 	}
 	return defaultClient.LoadModelFrom(bucketname, key, dest, options...)
-}
-
-func init() {
-	json.SkipTypes[reflect.TypeOf(Model{})] = true
-	json.SkipTypes[reflect.TypeOf(One{})] = true
-	json.SkipTypes[reflect.TypeOf(Many{})] = true
 }
