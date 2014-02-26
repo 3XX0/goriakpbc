@@ -38,7 +38,6 @@ var (
 	DestinationLengthError    = errors.New("Length of slice does not match number of siblings")
 	DestinationNotInitialized = errors.New("Destination struct is not initialized (correctly) using riak.New or riak.Load")
 	ModelDoesNotMatch         = errors.New("Warning: struct name does not match _type in Riak")
-	ModelNotNew               = errors.New("Destination struct already has an instantiated riak.Model (this struct is probably not new)")
 	NoSiblingData             = errors.New("No non-empty sibling data")
 )
 
@@ -322,11 +321,12 @@ func (b *Bucket) NewModel(key string, dest Resolver, options ...map[string]uint3
 	mv = mv.Elem()
 	mv.Set(rm)
 	if model.robject != nil {
-		return ModelNotNew
+		model.robject.Bucket = b
+	} else {
+		// For the riak.Model field within the struct, set the Client and Bucket
+		// and fields and set the RObject field to nil.
+		model.robject = &RObject{Bucket: b, Key: key, ContentType: "application/json", Options: options}
 	}
-	// For the riak.Model field within the struct, set the Client and Bucket
-	// and fields and set the RObject field to nil.
-	model.robject = &RObject{Bucket: b, Key: key, ContentType: "application/json", Options: options}
 	model.parent = dest
 	rm.Set(mv)
 
